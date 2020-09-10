@@ -1,2 +1,2 @@
 # Herd
-Distributed workload framework
+Distributed workload framework written in Go with grpc and protocol buffers.

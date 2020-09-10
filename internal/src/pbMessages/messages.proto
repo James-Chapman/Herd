@@ -1,0 +1,52 @@
+syntax = "proto3";
+package messages;
+
+option go_package = "pbMessages";
+
+// Oh hi
+
+message helloRequest {
+	int32 version = 1;
+	string ip = 2;
+	string fqdn = 3;
+}
+
+message helloResponse {
+	int32 version = 1;
+}
+
+service helloService {
+    rpc Hello(helloRequest) returns (helloResponse) {};
+}
+
+// heartbeat
+
+message ping {
+	int32 version = 1;
+}
+
+message pong {
+	int32 version = 1;
+    string name = 2;
+}
+
+service heartbeatService {
+    rpc Heartbeat(ping) returns (pong) {};
+}
+
+// work
+
+message workRequest {
+	int32 version = 1;
+    string command = 2;
+    string commandArgs = 3;
+}
+
+message workResponse {
+	int32 version = 1;
+    string output = 2;
+}
+
+service workService {
+    rpc Work(workRequest) returns (workResponse) {};
+}

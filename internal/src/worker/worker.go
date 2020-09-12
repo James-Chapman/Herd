@@ -19,6 +19,8 @@ var (
 	DebugLog bool
 )
 
+const helloVersion = 1
+
 type worker struct {
 }
 
@@ -52,7 +54,7 @@ func GetOutboundIP(server string) string {
 	dst := fmt.Sprintf("%s:80", server)
 	conn, err := net.Dial("udp", dst)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("ERROR: %v\n", err)
 	}
 	defer conn.Close()
 
@@ -63,37 +65,52 @@ func GetOutboundIP(server string) string {
 
 func RunHelloProtocol(server string, wg *sync.WaitGroup) {
 	for true {
-		opts := grpc.WithInsecure()
-		constr := fmt.Sprintf("%s:50050", server)
-		cc, err := grpc.Dial(constr, opts)
-		if err != nil {
-			log.Fatal(err)
-		}
 		localAddr := GetOutboundIP(server)
-		defer cc.Close()
-
-		networkclient := pbMessages.NewHelloServiceClient(cc)
-		hreq := &pbMessages.HelloRequest{Version: 1, Ip: localAddr}
-		if DebugLog {
-			fmt.Printf("HelloRequest => | ")
-		}
-		_, err = networkclient.Hello(context.Background(), hreq)
-		if err != nil {
-			fmt.Println(err)
-		} else {
-			if DebugLog {
-				fmt.Printf("<= HelloResponse\n")
-			}
+		connStr := fmt.Sprintf("%s:50050", server)
+		sent := false
+		for !sent {
+			pMessage := &pbMessages.HelloRequest{Version: 1, Ip: localAddr}
+			sent = SendHelloMessage(connStr, pMessage)
 		}
 		time.Sleep(20 * time.Second)
 	}
 }
 
-func RunHeartbeatListener(wg *sync.WaitGroup) {
+func SendHelloMessage(connString string, message *pbMessages.HelloRequest) bool {
+	opts := grpc.WithInsecure()
+	cc, err := grpc.Dial(connString, opts)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	}
+	defer cc.Close()
+
+	networkclient := pbMessages.NewHelloServiceClient(cc)
+
+	if DebugLog {
+		fmt.Printf("HelloRequest => | ")
+	}
+	response, err := networkclient.Hello(context.Background(), message)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	} else {
+		if DebugLog {
+			fmt.Printf("<= HelloResponse\n")
+		}
+		if response.GetVersion() != helloVersion {
+			fmt.Printf("Pong version [%d] doesn't match Ping version [%d].\n", response.GetVersion(), helloVersion)
+		}
+	}
+	cc.Close()
+	return true
+}
+
+func StartHeartbeatListener(wg *sync.WaitGroup) {
 	address := "0.0.0.0:50051"
 	lis, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Fatalf("Error %v", err)
+		log.Printf("ERROR: %v\n", err)
 	}
 	fmt.Printf("Herd worker is listening on %v ...\n", address)
 
@@ -103,11 +120,11 @@ func RunHeartbeatListener(wg *sync.WaitGroup) {
 	s.Serve(lis)
 }
 
-func RunWorkerListener(wg *sync.WaitGroup) {
+func StartWorkerListener(wg *sync.WaitGroup) {
 	address := "0.0.0.0:50052"
 	lis, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Fatalf("Error %v", err)
+		log.Printf("ERROR: %v\n", err)
 	}
 	fmt.Printf("Herd worker is listening on %v ...\n", address)
 
@@ -125,7 +142,7 @@ func execute(cmdstr string, args string) string {
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("ERROR: %v\n", err)
 	}
 
 	return out.String()

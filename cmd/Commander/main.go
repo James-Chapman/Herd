@@ -22,7 +22,7 @@ func main() {
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	go commander.RunHelloListener(&wg)
+	go commander.StartHelloListener(&wg)
 
 	wg.Add(1)
 	go commander.RunHearbeat(&wg)

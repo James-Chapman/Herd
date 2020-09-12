@@ -1,6 +1,6 @@
 // Worker unix OSes
 
-// +build linux
+// +build !windows
 
 package main
 
@@ -25,10 +25,10 @@ func main() {
 	go worker.RunHelloProtocol(*server, &wg)
 
 	wg.Add(1)
-	go worker.RunHeartbeatListener(&wg)
+	go worker.StartHeartbeatListener(&wg)
 
 	wg.Add(1)
-	go worker.RunWorkerListener(&wg)
+	go worker.StartWorkerListener(&wg)
 
 	wg.Wait()
 }

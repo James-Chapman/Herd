@@ -13,15 +13,41 @@ import (
 	"google.golang.org/grpc"
 )
 
-type WorkerMap map[string]bool
+type WorkerMap map[string]int
 
 func (wm WorkerMap) AddWorker(server string) {
 	_, found := wm[server]
 	if !found {
 		WorkersMtx.Lock()
-		wm[server] = true
+		wm[server] = 0
 		WorkersMtx.Unlock()
 	}
+}
+
+func (wm WorkerMap) AddNetError(server string) {
+	_, found := wm[server]
+	if found {
+		WorkersMtx.Lock()
+		wm[server] += 1
+		WorkersMtx.Unlock()
+	}
+}
+
+func (wm WorkerMap) ResetNetError(server string) {
+	_, found := wm[server]
+	if found {
+		WorkersMtx.Lock()
+		wm[server] = 0
+		WorkersMtx.Unlock()
+	}
+}
+
+func (wm WorkerMap) GetNetError(server string) int {
+	_, found := wm[server]
+	if found {
+		return wm[server]
+	}
+	return -1
 }
 
 var (
@@ -30,6 +56,9 @@ var (
 	Workers    WorkerMap
 	WorkersMtx sync.Mutex
 )
+
+const heartbeatVersion = 1
+const workVersion = 1
 
 type commander struct {
 }
@@ -65,64 +94,103 @@ func StartHelloListener(wg *sync.WaitGroup) {
 	s.Serve(lis)
 }
 
-// RunHearbeat is a loop responsible for sending
+// RunHearbeat responsible for sending ping (hearbeat) messages to workers
 func RunHearbeat(wg *sync.WaitGroup) {
 	for true {
-		for k, _ := range Workers {
-			opts := grpc.WithInsecure()
-			constr := fmt.Sprintf("%s:50051", k)
-			cc, err := grpc.Dial(constr, opts)
-			if err != nil {
-				log.Fatal(err)
+		for host, _ := range Workers {
+			sent := false
+			for !sent {
+				connStr := fmt.Sprintf("%s:50051", host)
+				pMessage := &pbMessages.Ping{Version: heartbeatVersion}
+				sent = SendHeartbeatMessage(connStr, pMessage)
 			}
-			defer cc.Close()
-			const version = 1
-
-			networkclient := pbMessages.NewHeartbeatServiceClient(cc)
-			ping := &pbMessages.Ping{Version: version}
-			if DebugLog {
-				fmt.Printf("ping => | ")
+			if !sent {
+				Workers.AddNetError(host)
 			}
-			pong, err = networkclient.Heartbeat(context.Background(), ping)
-			if err != nil {
-				fmt.Println(err)
-			} else {
-				if DebugLog {
-					fmt.Printf("<= pong\n")
-				}
-				if pong.GetVersion() != version {
-					fmt.Printf("Pong version [%d] doesn't match ping version [%d].\n", pong.GetVersion(), version)
-				}
-			}
-			time.Sleep(1 * time.Second)
 		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
-// RunWorkSender is a loop responsible for sending out work units to workers
+func SendHeartbeatMessage(connString string, message *pbMessages.Ping) bool {
+	opts := grpc.WithInsecure()
+	cc, err := grpc.Dial(connString, opts)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	}
+	defer cc.Close()
+
+	networkclient := pbMessages.NewHeartbeatServiceClient(cc)
+
+	if DebugLog {
+		fmt.Printf("ping => | ")
+	}
+	response, err := networkclient.Heartbeat(context.Background(), message)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	} else {
+		if DebugLog {
+			fmt.Printf("<= pong\n")
+		}
+		if response.GetVersion() != heartbeatVersion {
+			fmt.Printf("Pong version [%d] doesn't match Ping version [%d].\n", response.GetVersion(), heartbeatVersion)
+		}
+	}
+	cc.Close()
+	return true
+}
+
+// RunWorkSender is responsible for sending out work units to workers
 func RunWorkSender(wg *sync.WaitGroup) {
 	for true {
 		if len(Commands) > 0 {
-			for k, _ := range Workers {
-				opts := grpc.WithInsecure()
-				constr := fmt.Sprintf("%s:50052", k)
-				cc, err := grpc.Dial(constr, opts)
-				if err != nil {
-					log.Fatal(err)
+			for host, errCount := range Workers {
+				if errCount > 10 {
+					continue
 				}
-				defer cc.Close()
-
-				networkclient := pbMessages.NewWorkServiceClient(cc)
-				workrequest := &pbMessages.WorkRequest{Version: 1, Command: "ls"}
-				if DebugLog {
-					fmt.Printf("Work(\"ls\") => | ")
+				sent := false
+				for !sent {
+					connStr := fmt.Sprintf("%s:50052", host)
+					pMessage := &pbMessages.WorkRequest{Version: workVersion, Command: "ls"}
+					sent = SendWorkMessage(connStr, pMessage)
 				}
-				workresp, _ := networkclient.Work(context.Background(), workrequest)
-				fmt.Printf("Receive response => [%v]\n", workresp.Output)
-				time.Sleep(10 * time.Second)
 			}
+			time.Sleep(10 * time.Second)
 		}
 		time.Sleep(5 * time.Second)
 	}
 
+}
+
+func SendWorkMessage(connString string, message *pbMessages.WorkRequest) bool {
+	opts := grpc.WithInsecure()
+	cc, err := grpc.Dial(connString, opts)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	}
+	defer cc.Close()
+
+	networkclient := pbMessages.NewWorkServiceClient(cc)
+
+	if DebugLog {
+		fmt.Printf("workRequest.Command: %s => | ", message.GetCommand())
+	}
+
+	response, err := networkclient.Work(context.Background(), message)
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+		return false
+	} else {
+		if DebugLog {
+			fmt.Printf("Received workResponse => [%v]\n", response.Output)
+		}
+		if response.GetVersion() != workVersion {
+			fmt.Printf("WorkResponse version [%d] doesn't match WorkRequest version [%d].\n", response.GetVersion(), workVersion)
+		}
+	}
+	cc.Close()
+	return true
 }

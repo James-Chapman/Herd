@@ -1,8 +1,10 @@
 package commander
 
 import (
+	"bytes"
 	"common"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"net"
@@ -13,51 +15,13 @@ import (
 	"google.golang.org/grpc"
 )
 
-type WorkerMap map[string]int
-
-func (wm WorkerMap) AddWorker(server string) {
-	_, found := wm[server]
-	if !found {
-		WorkersMtx.Lock()
-		wm[server] = 0
-		WorkersMtx.Unlock()
-	}
-}
-
-func (wm WorkerMap) AddNetError(server string) {
-	_, found := wm[server]
-	if found {
-		WorkersMtx.Lock()
-		wm[server] += 1
-		WorkersMtx.Unlock()
-	}
-}
-
-func (wm WorkerMap) ResetNetError(server string) {
-	_, found := wm[server]
-	if found {
-		WorkersMtx.Lock()
-		wm[server] = 0
-		WorkersMtx.Unlock()
-	}
-}
-
-func (wm WorkerMap) GetNetError(server string) int {
-	_, found := wm[server]
-	if found {
-		return wm[server]
-	}
-	return -1
-}
-
 var (
 	DebugLog   bool
-	Commands   []common.Command
+	Commands   []common.Job
 	Workers    WorkerMap
 	WorkersMtx sync.Mutex
 )
 
-const heartbeatVersion = 1
 const workVersion = 1
 
 type commander struct {
@@ -98,17 +62,47 @@ func StartHelloListener(wg *sync.WaitGroup) {
 func RunHearbeat(wg *sync.WaitGroup) {
 	for true {
 		for host, _ := range Workers {
-			sent := false
-			for !sent {
-				connStr := fmt.Sprintf("%s:50051", host)
-				pMessage := &pbMessages.Ping{Version: heartbeatVersion}
-				sent = SendHeartbeatMessage(connStr, pMessage)
+			if Workers.GetStatus(host) == WORKER_ONLINE {
+				sent := false
+				retry := 0
+				for retry < 5 {
+					connStr := fmt.Sprintf("%s:50051", host)
+					pMessage := &pbMessages.Ping{Name: "name 1"}
+					sent = SendHeartbeatMessage(connStr, pMessage)
+					if sent {
+						retry = 5
+					} else {
+						time.Sleep(1 * time.Second)
+					}
+					retry += 1
+				}
+				if !sent {
+					Workers.AddNetError(host)
+					if Workers.GetNetErrors(host) > 10 {
+						fmt.Printf("Setting %s to OFFLINE\n", host)
+						Workers.SetStatus(host, WORKER_OFFLINE)
+					}
+				} else {
+					if Workers.GetStatus(host) == WORKER_OFFLINE {
+						fmt.Printf("Setting %s to ONLINE\n", host)
+						Workers.SetStatus(host, WORKER_ONLINE)
+						Workers.ResetNetError(host)
+					}
+				}
 			}
-			if !sent {
-				Workers.AddNetError(host)
+			if Workers.GetStatus(host) == WORKER_OFFLINE {
+				sent := false
+				connStr := fmt.Sprintf("%s:50051", host)
+				pMessage := &pbMessages.Ping{Name: "name 1"}
+				sent = SendHeartbeatMessage(connStr, pMessage)
+				if sent {
+					fmt.Printf("Setting %s to ONLINE\n", host)
+					Workers.SetStatus(host, WORKER_ONLINE)
+					Workers.ResetNetError(host)
+				}
 			}
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -116,26 +110,25 @@ func SendHeartbeatMessage(connString string, message *pbMessages.Ping) bool {
 	opts := grpc.WithInsecure()
 	cc, err := grpc.Dial(connString, opts)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		if DebugLog {
+			log.Printf("gRPC dial error: %v\n", err)
+		}
 		return false
 	}
 	defer cc.Close()
 
 	networkclient := pbMessages.NewHeartbeatServiceClient(cc)
-
-	if DebugLog {
-		fmt.Printf("ping => | ")
-	}
 	response, err := networkclient.Heartbeat(context.Background(), message)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		if DebugLog {
+			log.Printf("SendHeartbeatMessage() failed: %v\n", err)
+		}
 		return false
 	} else {
-		if DebugLog {
-			fmt.Printf("<= pong\n")
-		}
-		if response.GetVersion() != heartbeatVersion {
-			fmt.Printf("Pong version [%d] doesn't match Ping version [%d].\n", response.GetVersion(), heartbeatVersion)
+		if response != nil {
+			if DebugLog {
+				fmt.Printf("Sent 'Ping' to 'Heartbeat' service, received 'Pong'\n")
+			}
 		}
 	}
 	cc.Close()
@@ -146,15 +139,45 @@ func SendHeartbeatMessage(connString string, message *pbMessages.Ping) bool {
 func RunWorkSender(wg *sync.WaitGroup) {
 	for true {
 		if len(Commands) > 0 {
-			for host, errCount := range Workers {
-				if errCount > 10 {
+			for host, _ := range Workers {
+				// For each host we know about
+				if Workers.GetNetErrors(host) > 10 {
 					continue
 				}
-				sent := false
-				for !sent {
-					connStr := fmt.Sprintf("%s:50052", host)
-					pMessage := &pbMessages.WorkRequest{Version: workVersion, Command: "ls"}
-					sent = SendWorkMessage(connStr, pMessage)
+				// if node is online, try and send
+				if Workers.GetStatus(host) == WORKER_ONLINE {
+					sent := false
+					retry := 0
+					for retry < 5 {
+						connStr := fmt.Sprintf("%s:50052", host)
+						// construct the job struct
+						var job common.Job
+						job.Command = "ls"
+						job.Args = append(job.Args, "-l")
+						job.Status = common.WAITING
+
+						// serialise the struct into buffer
+						var buffer bytes.Buffer
+						enc := gob.NewEncoder(&buffer)
+						err := enc.Encode(job)
+						if err != nil {
+							log.Println("encode error:", err)
+						}
+
+						// turn buffer into []byte for protocol buffers message
+						jobdata := buffer.Bytes()
+
+						//construct the message and send
+						pMessage := &pbMessages.WorkRequest{JobID: 1, Job: jobdata}
+						sent = SendWorkMessage(connStr, pMessage)
+						if sent {
+							retry = 5
+						} else {
+							Workers.AddNetError(host)
+							time.Sleep(1 * time.Second)
+						}
+						retry += 1
+					}
 				}
 			}
 			time.Sleep(10 * time.Second)
@@ -168,27 +191,26 @@ func SendWorkMessage(connString string, message *pbMessages.WorkRequest) bool {
 	opts := grpc.WithInsecure()
 	cc, err := grpc.Dial(connString, opts)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		if DebugLog {
+			log.Printf("gRPC dial error: %v\n", err)
+		}
 		return false
 	}
 	defer cc.Close()
 
 	networkclient := pbMessages.NewWorkServiceClient(cc)
-
-	if DebugLog {
-		fmt.Printf("workRequest.Command: %s => | ", message.GetCommand())
-	}
-
 	response, err := networkclient.Work(context.Background(), message)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		if DebugLog {
+			log.Printf("SendWorkMessage() failed: %v\n", err)
+		}
 		return false
 	} else {
-		if DebugLog {
-			fmt.Printf("Received workResponse => [%v]\n", response.Output)
-		}
-		if response.GetVersion() != workVersion {
-			fmt.Printf("WorkResponse version [%d] doesn't match WorkRequest version [%d].\n", response.GetVersion(), workVersion)
+		if response != nil {
+			if DebugLog {
+				fmt.Printf("Sent 'WorkRequest' to 'Work' service, received 'WorkResponse'\n")
+				fmt.Printf("WorkResponse.Output:\n%v\n", response.Output)
+			}
 		}
 	}
 	cc.Close()

@@ -3,7 +3,7 @@ package messages;
 
 option go_package = "pbMessages";
 
-// Oh hi
+// Hello service (helloRequest/helloResponse)
 
 message helloRequest {
 	int32 version = 1;
@@ -19,34 +19,41 @@ service helloService {
     rpc Hello(helloRequest) returns (helloResponse) {};
 }
 
-// heartbeat
-
+// Heartbeat service (ping/pong)
 message ping {
-	int32 version = 1;
+	string name = 1;
 }
 
 message pong {
-	int32 version = 1;
-    string name = 2;
+    string name = 1;
 }
 
 service heartbeatService {
     rpc Heartbeat(ping) returns (pong) {};
 }
 
-// work
-
+// Work service (workRequest/workResponse)
 message workRequest {
-	int32 version = 1;
-    string command = 2;
-    string commandArgs = 3;
+	int32 jobID = 1;
+    bytes job = 2;
 }
 
 message workResponse {
-	int32 version = 1;
+	int32 jobID = 1;
     string output = 2;
 }
 
 service workService {
     rpc Work(workRequest) returns (workResponse) {};
+}
+
+
+// Stdout & Errout (requestStdOut/responseStdOut) 
+message requestStdOut {
+	int32 jobID = 1;
+}
+
+message responseStdOut {
+	int32 jobID = 1;
+	string data = 2;
 }

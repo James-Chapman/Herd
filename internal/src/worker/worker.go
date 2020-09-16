@@ -2,7 +2,9 @@ package worker
 
 import (
 	"bytes"
+	"common"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"net"
@@ -25,53 +27,44 @@ type worker struct {
 }
 
 func (*worker) Heartbeat(ctx context.Context, request *pbMessages.Ping) (*pbMessages.Pong, error) {
-	ver := request.GetVersion()
-	if ver == 1 {
-
-	}
-
+	name := request.GetName()
 	response := &pbMessages.Pong{
-		Version: 1,
-		Name:    "name",
+		Name: name,
 	}
 	return response, nil
 }
 
 func (*worker) Work(ctx context.Context, request *pbMessages.WorkRequest) (*pbMessages.WorkResponse, error) {
-	command := request.GetCommand()
-	args := request.GetCommandArgs()
-	fmt.Println(command)
+	// job data is []byte, but needs to be bytes.buffer for deserialisation
+	byteData := request.GetJob()
+	// create bytes.buffer
+	buffer := bytes.NewBuffer(byteData)
 
+	// deserialise into job struct
+	decoder := gob.NewDecoder(buffer)
+	var job common.Job
+	err := decoder.Decode(&job)
+	if err != nil {
+		fmt.Printf("gob decode error: %v", err)
+	}
 	response := &pbMessages.WorkResponse{
-		Version: 1,
-		Output:  execute(command, args),
+		Output: executeCmd(job.Command, job.Args),
 	}
 	return response, nil
 }
 
-// Get preferred outbound ip of this machine
-func GetOutboundIP(server string) string {
-	dst := fmt.Sprintf("%s:80", server)
-	conn, err := net.Dial("udp", dst)
-	if err != nil {
-		log.Printf("ERROR: %v\n", err)
-	}
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-
-	return localAddr.IP.String()
-}
-
 func RunHelloProtocol(server string, wg *sync.WaitGroup) {
 	for true {
-		localAddr := GetOutboundIP(server)
+		localAddr := common.GetOutboundIP(server)
 		connStr := fmt.Sprintf("%s:50050", server)
 		sent := false
-		for !sent {
-			pMessage := &pbMessages.HelloRequest{Version: 1, Ip: localAddr}
-			sent = SendHelloMessage(connStr, pMessage)
+
+		pMessage := &pbMessages.HelloRequest{Version: 1, Ip: localAddr}
+		sent = SendHelloMessage(connStr, pMessage)
+		if !sent {
+			log.Println("Sending HelloRequest failed.")
 		}
+
 		time.Sleep(20 * time.Second)
 	}
 }
@@ -80,26 +73,21 @@ func SendHelloMessage(connString string, message *pbMessages.HelloRequest) bool 
 	opts := grpc.WithInsecure()
 	cc, err := grpc.Dial(connString, opts)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		log.Printf("gRPC dial error: %v\n", err)
 		return false
 	}
 	defer cc.Close()
 
 	networkclient := pbMessages.NewHelloServiceClient(cc)
-
-	if DebugLog {
-		fmt.Printf("HelloRequest => | ")
-	}
 	response, err := networkclient.Hello(context.Background(), message)
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		log.Printf("SendHelloMessage() failed: %v\n", err)
 		return false
 	} else {
-		if DebugLog {
-			fmt.Printf("<= HelloResponse\n")
-		}
-		if response.GetVersion() != helloVersion {
-			fmt.Printf("Pong version [%d] doesn't match Ping version [%d].\n", response.GetVersion(), helloVersion)
+		if response != nil {
+			if DebugLog {
+				fmt.Printf("Sent 'HelloRequest' to 'Hello' service, received 'HelloResponse'\n")
+			}
 		}
 	}
 	cc.Close()
@@ -134,15 +122,18 @@ func StartWorkerListener(wg *sync.WaitGroup) {
 	s.Serve(lis)
 }
 
-func execute(cmdstr string, args string) string {
+func executeCmd(cmdstr string, args []string) string {
 
 	cmd := exec.Command(cmdstr)
+	if DebugLog {
+		fmt.Printf("cmd string: %s\n", cmdstr)
+	}
 	//cmd.Stdin = strings.NewReader("some input")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		log.Printf("CMD ERROR: %v\n", err)
 	}
 
 	return out.String()

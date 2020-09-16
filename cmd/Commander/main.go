@@ -30,7 +30,8 @@ func main() {
 	wg.Add(1)
 	go commander.RunWorkSender(&wg)
 
-	commander.Commands = append(commander.Commands, common.Command{"ls", "-la"})
+	newJob := common.Job{"ls", nil, common.WAITING}
+	commander.Commands = append(commander.Commands, newJob)
 
 	wg.Wait()
 
